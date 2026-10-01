@@ -19,7 +19,7 @@ import class Foundation.ProcessInfo
 import Logging
 
 extension OTel.Configuration {
-    func makeDiagnosticLogger() -> Logger {
+    func makeDiagnosticLogger(environment: [String: String] = ProcessInfo.processInfo.environment) -> Logger {
         var logger = switch self.diagnosticLogger.backing {
         case .console:
             Logger(label: "swift-otel", factory: { label in StreamLogHandler.standardError(label: label) })
@@ -27,12 +27,12 @@ extension OTel.Configuration {
             logger
         }
         // Environment variable overrides may not have been applied, so we explicitly check here.
-        logger.logLevel = Self.diagnosticLogLevelEnvironmentOverride ?? Logger.Level(self.diagnosticLogLevel)
+        logger.logLevel = Self.diagnosticLogLevelEnvironmentOverride(environment: environment) ?? Logger.Level(self.diagnosticLogLevel)
         return logger
     }
 
-    fileprivate static let diagnosticLogLevelEnvironmentOverride: Logger.Level? = {
-        switch ProcessInfo.processInfo.environment.getStringValue(.logLevel) {
+    fileprivate static func diagnosticLogLevelEnvironmentOverride(environment: [String: String]) -> Logger.Level? {
+        switch environment.getStringValue(.logLevel) {
         case "trace": .trace
         case "debug": .debug
         case "info": .info
@@ -42,7 +42,7 @@ extension OTel.Configuration {
         case "critical": .critical
         default: nil
         }
-    }()
+    }
 }
 
 extension Logger {

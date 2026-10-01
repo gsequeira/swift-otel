@@ -108,9 +108,18 @@ extension OTel {
     ///   - ``makeMetricsBackend(configuration:)`` for metrics backend creation
     ///   - ``makeTracingBackend(configuration:)`` for tracing backend creation
     public static func makeLoggingBackend(configuration: OTel.Configuration = .default) throws -> (factory: @Sendable (String) -> any LogHandler, service: some Service) {
-        let logger = configuration.makeDiagnosticLogger().withMetadata(component: "makeLoggingBackend")
+        try makeLoggingBackend(configuration: configuration, environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// Create a logging backend using only the supplied environment for overrides and diagnostics.
+    ///
+    /// - Parameters:
+    ///   - configuration: The initial backend configuration.
+    ///   - environment: Explicit overrides. An empty dictionary prevents implicit process-environment overrides.
+    public static func makeLoggingBackend(configuration: OTel.Configuration = .default, environment: [String: String]) throws -> (factory: @Sendable (String) -> any LogHandler, service: some Service) {
+        let logger = configuration.makeDiagnosticLogger(environment: environment).withMetadata(component: "makeLoggingBackend")
         var configuration = configuration
-        configuration.applyEnvironmentOverrides(environment: ProcessInfo.processInfo.environment, logger: logger)
+        configuration.applyEnvironmentOverrides(environment: environment, logger: logger)
         return try makeLoggingBackend(resolvedConfiguration: configuration, logger: logger)
     }
 
@@ -226,9 +235,18 @@ extension OTel {
     ///   - ``makeLoggingBackend(configuration:)`` for logging backend creation
     ///   - ``makeTracingBackend(configuration:)`` for tracing backend creation
     public static func makeMetricsBackend(configuration: OTel.Configuration = .default) throws -> (factory: some MetricsFactory, service: some Service) {
-        let logger = configuration.makeDiagnosticLogger().withMetadata(component: "makeMetricsBackend")
+        try makeMetricsBackend(configuration: configuration, environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// Create a metrics backend using only the supplied environment for overrides and diagnostics.
+    ///
+    /// - Parameters:
+    ///   - configuration: The initial backend configuration.
+    ///   - environment: Explicit overrides. An empty dictionary prevents implicit process-environment overrides.
+    public static func makeMetricsBackend(configuration: OTel.Configuration = .default, environment: [String: String]) throws -> (factory: some MetricsFactory, service: some Service) {
+        let logger = configuration.makeDiagnosticLogger(environment: environment).withMetadata(component: "makeMetricsBackend")
         var configuration = configuration
-        configuration.applyEnvironmentOverrides(environment: ProcessInfo.processInfo.environment, logger: logger)
+        configuration.applyEnvironmentOverrides(environment: environment, logger: logger)
         return try makeMetricsBackend(resolvedConfiguration: configuration, logger: logger)
     }
 
@@ -249,12 +267,15 @@ extension OTel {
                 )
             }
         }
+        guard resolvedConfiguration.metrics.maximumSeries.map({ $0 > 0 }) ?? true else {
+            throw OTel.Configuration.Error.invalidConfiguration("metric series capacity must be positive")
+        }
         let resource = OTelResource(configuration: resolvedConfiguration)
         let temporality: OTelAggregationTemporality = switch resolvedConfiguration.metrics.temporalityPreference.backing {
         case .cumulative: .cumulative
         case .delta: .delta
         }
-        let registry = OTelMetricRegistry(temporality: temporality, logger: logger)
+        let registry = OTelMetricRegistry(temporality: temporality, maximumSeries: resolvedConfiguration.metrics.maximumSeries, logger: logger)
         let factory = OTLPMetricsFactory(
             registry: registry,
             configuration: .init(
@@ -371,15 +392,29 @@ extension OTel {
     ///   - ``makeLoggingBackend(configuration:)`` for logging backend creation
     ///   - ``makeMetricsBackend(configuration:)`` for metrics backend creation
     public static func makeTracingBackend(configuration: OTel.Configuration = .default) throws -> (factory: some Tracer, service: some Service) {
-        let logger = configuration.makeDiagnosticLogger().withMetadata(component: "makeTracingBackend")
+        try makeTracingBackend(configuration: configuration, environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// Create a tracing backend using only the supplied environment for overrides and diagnostics.
+    ///
+    /// - Parameters:
+    ///   - configuration: The initial backend configuration.
+    ///   - environment: Explicit overrides. An empty dictionary prevents implicit process-environment overrides.
+    public static func makeTracingBackend(configuration: OTel.Configuration = .default, environment: [String: String]) throws -> (factory: some Tracer, service: some Service) {
+        let logger = configuration.makeDiagnosticLogger(environment: environment).withMetadata(component: "makeTracingBackend")
         var configuration = configuration
-        configuration.applyEnvironmentOverrides(environment: ProcessInfo.processInfo.environment, logger: logger)
+        configuration.applyEnvironmentOverrides(environment: environment, logger: logger)
         return try makeTracingBackend(resolvedConfiguration: configuration, logger: logger)
     }
 
     internal static func makeTracingBackend(resolvedConfiguration: OTel.Configuration, logger: Logger) throws -> (factory: some Tracer, service: some Service) {
         guard resolvedConfiguration.traces.enabled else {
             throw OTel.Configuration.Error.invalidConfiguration("makeTracingBackend called but config has traces disabled")
+        }
+        let batchConfiguration = resolvedConfiguration.traces.batchSpanProcessor
+        guard batchConfiguration.maxQueueSize > 0, batchConfiguration.maxExportBatchSize > 0,
+              batchConfiguration.scheduleDelay > .zero, batchConfiguration.exportTimeout > .zero else {
+            throw OTel.Configuration.Error.invalidConfiguration("trace batch capacities and durations must be positive")
         }
         let resource = OTelResource(configuration: resolvedConfiguration)
         let sampler = WrappedSampler(configuration: resolvedConfiguration)

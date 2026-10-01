@@ -31,6 +31,18 @@ final class OTelMetricRegistry: Sendable {
         var valueExponentialHistograms = [InstrumentIdentifier: [Set<Attribute>: ValueExponentialHistogram]]()
         var durationExponentialHistograms = [InstrumentIdentifier: [Set<Attribute>: DurationExponentialHistogram]]()
 
+        var maximumSeries: Int? = nil
+        var seriesCount: Int {
+            counters.values.reduce(0) { $0 + $1.count }
+            + floatingPointCounters.values.reduce(0) { $0 + $1.count }
+            + gauges.values.reduce(0) { $0 + $1.count }
+            + valueHistograms.values.reduce(0) { $0 + $1.count }
+            + durationHistograms.values.reduce(0) { $0 + $1.count }
+            + valueExponentialHistograms.values.reduce(0) { $0 + $1.count }
+            + durationExponentialHistograms.values.reduce(0) { $0 + $1.count }
+        }
+        var hasCapacity: Bool { maximumSeries.map { seriesCount < $0 } ?? true }
+
         var registrations = [String: Set<InstrumentIdentifier>]()
         let duplicateRegistrationHandler: DuplicateRegistrationHandler?
 
@@ -49,6 +61,8 @@ final class OTelMetricRegistry: Sendable {
             existingRegistrations.remove(identifier)
             if existingRegistrations.isEmpty {
                 registrations.removeValue(forKey: name)
+            } else {
+                registrations[name] = existingRegistrations
             }
         }
     }
@@ -73,10 +87,11 @@ final class OTelMetricRegistry: Sendable {
         static let crash = Self(behavior: .crash)
     }
 
-    init(duplicateRegistrationHandler: some DuplicateRegistrationHandler, temporality: OTelAggregationTemporality = .cumulative, logger: Logger) {
+    init(duplicateRegistrationHandler: some DuplicateRegistrationHandler, temporality: OTelAggregationTemporality = .cumulative, maximumSeries: Int? = nil, logger: Logger) {
         self.logger = logger.withMetadata(component: "OTelMetricRegistry")
         self.temporality = temporality
-        storage = .init(Storage(duplicateRegistrationHandler: duplicateRegistrationHandler))
+        precondition(maximumSeries == nil || maximumSeries! > 0)
+        storage = .init(Storage(maximumSeries: maximumSeries, duplicateRegistrationHandler: duplicateRegistrationHandler))
     }
 
     /// Create a new ``OTelMetricRegistry``.
@@ -86,12 +101,12 @@ final class OTelMetricRegistry: Sendable {
     ///   - temporality: The aggregation temporality preference for exported metrics.
     ///
     /// - Seealso: ``OTelMetricRegistry/DuplicateRegistrationBehavior``.
-    convenience init(onDuplicateRegistration: DuplicateRegistrationBehavior = .warn, temporality: OTelAggregationTemporality = .cumulative, logger: Logger) {
+    convenience init(onDuplicateRegistration: DuplicateRegistrationBehavior = .warn, temporality: OTelAggregationTemporality = .cumulative, maximumSeries: Int? = nil, logger: Logger) {
         switch onDuplicateRegistration.behavior {
         case .warn:
-            self.init(duplicateRegistrationHandler: WarningDuplicateRegistrationHandler(logger: logger), temporality: temporality, logger: logger)
+            self.init(duplicateRegistrationHandler: WarningDuplicateRegistrationHandler(logger: logger), temporality: temporality, maximumSeries: maximumSeries, logger: logger)
         case .crash:
-            self.init(duplicateRegistrationHandler: FatalErrorDuplicateRegistrationHandler(), temporality: temporality, logger: logger)
+            self.init(duplicateRegistrationHandler: FatalErrorDuplicateRegistrationHandler(), temporality: temporality, maximumSeries: maximumSeries, logger: logger)
         }
     }
 
@@ -102,11 +117,13 @@ final class OTelMetricRegistry: Sendable {
                 if let existingInstrument = existingInstruments[attributes] {
                     return existingInstrument
                 }
+                guard storage.hasCapacity else { return Counter(name: name, unit: unit, description: description, attributes: attributes, temporality: temporality) }
                 let newInstrument = Counter(name: name, unit: unit, description: description, attributes: attributes, temporality: temporality)
                 existingInstruments[attributes] = newInstrument
                 storage.counters[identifier] = existingInstruments
                 return newInstrument
             }
+            guard storage.hasCapacity else { return Counter(name: name, unit: unit, description: description, attributes: attributes, temporality: temporality) }
             storage.register(identifier, forName: name)
             let newInstrument = Counter(name: name, unit: unit, description: description, attributes: attributes, temporality: temporality)
             storage.counters[identifier] = [attributes: newInstrument]
@@ -121,11 +138,13 @@ final class OTelMetricRegistry: Sendable {
                 if let existingInstrument = existingInstruments[attributes] {
                     return existingInstrument
                 }
+                guard storage.hasCapacity else { return FloatingPointCounter(name: name, unit: unit, description: description, attributes: attributes, temporality: temporality) }
                 let newInstrument = FloatingPointCounter(name: name, unit: unit, description: description, attributes: attributes, temporality: temporality)
                 existingInstruments[attributes] = newInstrument
                 storage.floatingPointCounters[identifier] = existingInstruments
                 return newInstrument
             }
+            guard storage.hasCapacity else { return FloatingPointCounter(name: name, unit: unit, description: description, attributes: attributes, temporality: temporality) }
             storage.register(identifier, forName: name)
             let newInstrument = FloatingPointCounter(name: name, unit: unit, description: description, attributes: attributes, temporality: temporality)
             storage.floatingPointCounters[identifier] = [attributes: newInstrument]
@@ -140,11 +159,13 @@ final class OTelMetricRegistry: Sendable {
                 if let existingInstrument = existingInstruments[attributes] {
                     return existingInstrument
                 }
+                guard storage.hasCapacity else { return Gauge(name: name, unit: unit, description: description, attributes: attributes) }
                 let newInstrument = Gauge(name: name, unit: unit, description: description, attributes: attributes)
                 existingInstruments[attributes] = newInstrument
                 storage.gauges[identifier] = existingInstruments
                 return newInstrument
             }
+            guard storage.hasCapacity else { return Gauge(name: name, unit: unit, description: description, attributes: attributes) }
             storage.register(identifier, forName: name)
             let newInstrument = Gauge(name: name, unit: unit, description: description, attributes: attributes)
             storage.gauges[identifier] = [attributes: newInstrument]
@@ -159,11 +180,13 @@ final class OTelMetricRegistry: Sendable {
                 if let existingInstrument = existingInstruments[attributes] {
                     return existingInstrument
                 }
+                guard storage.hasCapacity else { return DurationHistogram(name: name, unit: unit, description: description, attributes: attributes, buckets: buckets, temporality: temporality) }
                 let newInstrument = DurationHistogram(name: name, unit: unit, description: description, attributes: attributes, buckets: buckets, temporality: temporality)
                 existingInstruments[attributes] = newInstrument
                 storage.durationHistograms[identifier] = existingInstruments
                 return newInstrument
             }
+            guard storage.hasCapacity else { return DurationHistogram(name: name, unit: unit, description: description, attributes: attributes, buckets: buckets, temporality: temporality) }
             storage.register(identifier, forName: name)
             let newInstrument = DurationHistogram(name: name, unit: unit, description: description, attributes: attributes, buckets: buckets, temporality: temporality)
             storage.durationHistograms[identifier] = [attributes: newInstrument]
@@ -178,11 +201,13 @@ final class OTelMetricRegistry: Sendable {
                 if let existingInstrument = existingInstruments[attributes] {
                     return existingInstrument
                 }
+                guard storage.hasCapacity else { return ValueHistogram(name: name, unit: unit, description: description, attributes: attributes, buckets: buckets, temporality: temporality) }
                 let newInstrument = ValueHistogram(name: name, unit: unit, description: description, attributes: attributes, buckets: buckets, temporality: temporality)
                 existingInstruments[attributes] = newInstrument
                 storage.valueHistograms[identifier] = existingInstruments
                 return newInstrument
             }
+            guard storage.hasCapacity else { return ValueHistogram(name: name, unit: unit, description: description, attributes: attributes, buckets: buckets, temporality: temporality) }
             storage.register(identifier, forName: name)
             let newInstrument = ValueHistogram(name: name, unit: unit, description: description, attributes: attributes, buckets: buckets, temporality: temporality)
             storage.valueHistograms[identifier] = [attributes: newInstrument]
@@ -197,11 +222,13 @@ final class OTelMetricRegistry: Sendable {
                 if let existingInstrument = existingInstruments[attributes] {
                     return existingInstrument
                 }
+                guard storage.hasCapacity else { return DurationExponentialHistogram(name: name, unit: unit, description: description, attributes: attributes, maxSize: maxSize, maxScale: maxScale, temporality: temporality) }
                 let newInstrument = DurationExponentialHistogram(name: name, unit: unit, description: description, attributes: attributes, maxSize: maxSize, maxScale: maxScale, temporality: temporality)
                 existingInstruments[attributes] = newInstrument
                 storage.durationExponentialHistograms[identifier] = existingInstruments
                 return newInstrument
             }
+            guard storage.hasCapacity else { return DurationExponentialHistogram(name: name, unit: unit, description: description, attributes: attributes, maxSize: maxSize, maxScale: maxScale, temporality: temporality) }
             storage.register(identifier, forName: name)
             let newInstrument = DurationExponentialHistogram(name: name, unit: unit, description: description, attributes: attributes, maxSize: maxSize, maxScale: maxScale, temporality: temporality)
             storage.durationExponentialHistograms[identifier] = [attributes: newInstrument]
@@ -216,11 +243,13 @@ final class OTelMetricRegistry: Sendable {
                 if let existingInstrument = existingInstruments[attributes] {
                     return existingInstrument
                 }
+                guard storage.hasCapacity else { return ValueExponentialHistogram(name: name, unit: unit, description: description, attributes: attributes, maxSize: maxSize, maxScale: maxScale, temporality: temporality) }
                 let newInstrument = ValueExponentialHistogram(name: name, unit: unit, description: description, attributes: attributes, maxSize: maxSize, maxScale: maxScale, temporality: temporality)
                 existingInstruments[attributes] = newInstrument
                 storage.valueExponentialHistograms[identifier] = existingInstruments
                 return newInstrument
             }
+            guard storage.hasCapacity else { return ValueExponentialHistogram(name: name, unit: unit, description: description, attributes: attributes, maxSize: maxSize, maxScale: maxScale, temporality: temporality) }
             storage.register(identifier, forName: name)
             let newInstrument = ValueExponentialHistogram(name: name, unit: unit, description: description, attributes: attributes, maxSize: maxSize, maxScale: maxScale, temporality: temporality)
             storage.valueExponentialHistograms[identifier] = [attributes: newInstrument]

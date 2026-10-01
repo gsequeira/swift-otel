@@ -66,7 +66,6 @@ final class OTLPHTTPMetricExporter: OTelMetricExporter {
                 logLevel = .warning
             }
             logger.log(level: logLevel, "Partial success", metadata: [
-                "message": "\(response.partialSuccess.errorMessage)",
                 "rejected_data_points": "\(response.partialSuccess.rejectedDataPoints)",
             ])
         }

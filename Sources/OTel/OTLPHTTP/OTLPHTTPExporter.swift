@@ -36,6 +36,7 @@ final class OTLPHTTPExporter<Request: Message, Response: Message>: Sendable {
     private let logger: Logger
     let configuration: OTel.Configuration.OTLPExporterConfiguration
     let httpClient: HTTPClient
+    private let shutdownStarted = NIOLockedValueBox(false)
     private let dynamicState: NIOLockedValueBox<OTel.Configuration.OTLPExporterConfiguration.DynamicExportConfiguration>
 
     init(configuration: OTel.Configuration.OTLPExporterConfiguration, logger: Logger) throws {
@@ -63,6 +64,12 @@ final class OTLPHTTPExporter<Request: Message, Response: Message>: Sendable {
     }
 
     func send(_ proto: Request) async throws -> Response {
+        try await withTimeout(configuration.timeout) {
+            try await self.sendWithinDeadline(proto)
+        }
+    }
+
+    private func sendWithinDeadline(_ proto: Request) async throws -> Response {
         let response = try await sendOnce(proto)
         if response.status.code == 401, let handler = configuration.onExportFailure {
             let snapshot = dynamicState.withLockedValue { $0 }
@@ -150,7 +157,12 @@ final class OTLPHTTPExporter<Request: Message, Response: Message>: Sendable {
     }
 
     func shutdown() async {
-        try? await self.httpClient.shutdown()
+        let first = shutdownStarted.withLockedValue { started in
+            guard !started else { return false }
+            started = true
+            return true
+        }
+        if first { try? await self.httpClient.shutdown() }
     }
 }
 

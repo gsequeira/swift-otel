@@ -15,6 +15,8 @@ import Tracing
 
 /// A read-only representation of an ended ``OTelSpan``.
 struct OTelFinishedSpan: Sendable {
+    var admission: OTelSpanAdmission? = nil
+
     /// The context of this span.
     let spanContext: OTelSpanContext
 

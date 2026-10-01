@@ -26,6 +26,39 @@ extension OTelMetricRegistry: OTelMetricProducer {
         return buffer
     }
 
+    func produceCancellable() async throws -> [OTelMetricPoint] {
+        try Task.checkCancellation()
+        let metrics = storage.withLockedValue { $0 }
+        var buffer: [OTelMetricPoint] = []
+        try await appendGroupedCancellable(metrics.counters, to: &buffer)
+        try await appendGroupedCancellable(metrics.floatingPointCounters, to: &buffer)
+        try await appendGroupedCancellable(metrics.gauges, to: &buffer)
+        try await appendGroupedCancellable(metrics.durationHistograms, to: &buffer)
+        try await appendGroupedCancellable(metrics.valueHistograms, to: &buffer)
+        try await appendGroupedCancellable(metrics.durationExponentialHistograms, to: &buffer)
+        try await appendGroupedCancellable(metrics.valueExponentialHistograms, to: &buffer)
+        return buffer
+    }
+
+    // Internal for focused cancellation tests. One supported bounded instrument per checkpoint.
+    func appendGroupedCancellable(
+        _ instrumentsByIdentifier: [InstrumentIdentifier: [Set<Attribute>: some OTelMetricInstrument]],
+        to buffer: inout [OTelMetricPoint]
+    ) async throws {
+        for instruments in instrumentsByIdentifier.values {
+            var point: OTelMetricPoint?
+            for instrument in instruments.values {
+                await Task.yield()
+                try Task.checkCancellation()
+                let measured = instrument.measure()
+                if point == nil { point = measured }
+                else { point!.data.data.appendDataPoints(from: measured.data.data) }
+            }
+            if let point { buffer.append(point) }
+        }
+        try Task.checkCancellation()
+    }
+
     /// Measure every instrument sharing an identifier (name, unit, description, kind) and emit them
     /// as a single metric point carrying one data point per attribute set.
     ///

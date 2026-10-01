@@ -305,6 +305,10 @@ extension OTel.Configuration {
     ///
     /// Controls metric instrument registration, aggregation, and periodic export behavior.
     public struct MetricsConfiguration: Sendable {
+        /// Optional cap on retained instrument/attribute-set series; overflow is not collected.
+        /// No environment override. Nil preserves upstream behavior.
+        public var maximumSeries: Int? = nil
+
         /// Whether metrics collection is enabled.
         ///
         /// - Environment variable(s): `OTEL_SDK_DISABLED`.

@@ -42,23 +42,25 @@ struct OTelPeriodicExportingMetricsReader<Clock: _Concurrency.Clock> where Clock
 
     func tick() async {
         logger.trace("Reading metrics from producer.")
-        let metrics = producer.produce()
-        let batch = [
-            OTelResourceMetrics(
-                resource: resource,
-                scopeMetrics: [OTelScopeMetrics(
-                    scope: .init(name: "swift-otel", version: OTelLibrary.version, attributes: [], droppedAttributeCount: 0),
-                    metrics: metrics
-                )]
-            ),
-        ]
-        logger.debug("Exporting metrics.", metadata: ["count": "\(metrics.count)"])
         do {
             try await withTimeout(configuration.exportTimeout, clock: clock) {
+                try Task.checkCancellation()
+                let metrics = try await producer.produceCancellable()
+                try Task.checkCancellation()
+                let batch = [
+                    OTelResourceMetrics(
+                        resource: resource,
+                        scopeMetrics: [OTelScopeMetrics(
+                            scope: .init(name: "swift-otel", version: OTelLibrary.version, attributes: [], droppedAttributeCount: 0),
+                            metrics: metrics
+                        )]
+                    ),
+                ]
+                logger.debug("Exporting metrics.", metadata: ["count": "\(metrics.count)"])
                 try await exporter.export(batch)
             }
         } catch {
-            logger.warning("Failed to export metrics.", error: error)
+            logger.warning("Failed to export metrics.")
         }
     }
 }
@@ -76,7 +78,11 @@ extension OTelPeriodicExportingMetricsReader: CustomStringConvertible, Service {
         logger.debug("Shutting down.")
         // Unlike traces, force-flush is just a regular tick for metrics; no need for a different function.
         await tick()
-        try await exporter.forceFlush()
+        do {
+            try await exporter.forceFlush()
+        } catch {
+            logger.warning("Failed to flush metrics.")
+        }
         await exporter.shutdown()
         logger.debug("Shut down.")
     }

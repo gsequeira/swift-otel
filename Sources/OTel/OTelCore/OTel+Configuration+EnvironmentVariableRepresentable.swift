@@ -71,9 +71,6 @@ extension Logger {
         var logger = self
 
         logger[metadataKey: "environment_key"] = "\(environmentKey)"
-        logger[metadataKey: "environment_value"] = "\(environmentValue)"
-        logger[metadataKey: "previous_value"] = "\(previousValue)"
-        logger[metadataKey: "new_value"] = "\(newValue)"
 
         switch result {
         case .success:

@@ -14,6 +14,7 @@
 import AsyncAlgorithms
 import DequeModule
 import Logging
+import NIOConcurrencyHelpers
 import ServiceLifecycle
 
 /// A span processor that batches finished spans and forwards them to a configured exporter.
@@ -39,6 +40,8 @@ actor OTelBatchSpanProcessor<Exporter: OTelSpanExporter, Clock: _Concurrency.Clo
     private let explicitTickStream: AsyncStream<Void>
     private let explicitTick: AsyncStream<Void>.Continuation
     private var batchID: UInt = 0
+    private var reportedAdmissionDrops = 0
+    nonisolated let admissionBudget: OTelSpanBudget
 
     init(exporter: Exporter, configuration: OTel.Configuration.TracesConfiguration.BatchSpanProcessorConfiguration, logger: Logger, clock: Clock) {
         self.logger = logger.withMetadata(component: "OTelBatchSpanProcessor")
@@ -46,13 +49,18 @@ actor OTelBatchSpanProcessor<Exporter: OTelSpanExporter, Clock: _Concurrency.Clo
         self.configuration = configuration
         self.clock = clock
 
+        admissionBudget = OTelSpanBudget(limit: configuration.maxQueueSize)
         buffer = Deque(minimumCapacity: configuration.maxQueueSize)
-        (explicitTickStream, explicitTick) = AsyncStream.makeStream()
-        (spanStream, spanContinuation) = AsyncStream.makeStream()
+        (explicitTickStream, explicitTick) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
+        (spanStream, spanContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingOldest(configuration.maxQueueSize))
     }
 
     nonisolated func onEnd(_ span: OTelFinishedSpan) {
-        spanContinuation.yield(span)
+        guard span.spanContext.traceFlags.contains(.sampled),
+              let admission = admissionBudget.acquire() else { return }
+        var admittedSpan = span
+        admittedSpan.admission = admission
+        spanContinuation.yield(admittedSpan)
     }
 
     func _onSpan(_ span: OTelFinishedSpan) {
@@ -85,15 +93,18 @@ actor OTelBatchSpanProcessor<Exporter: OTelSpanExporter, Clock: _Concurrency.Clo
                     }
                     self.logger.debug("Span stream finished.")
                 }
-                for await _ in mergedSequence where !(self.buffer.isEmpty) {
-                    await self.tick()
+                for await _ in mergedSequence {
+                    self.reportDroppedSpans()
+                    if !self.buffer.isEmpty { await self.tick() }
                 }
                 await taskGroup.waitForAll()
             } onGracefulShutdown: {
                 self.logger.debug("Shutting down.")
+                self.admissionBudget.close()
                 self.spanContinuation.finish()
                 self.explicitTick.finish()
             }
+            self.reportDroppedSpans()
             try? await self.forceFlush()
             await self.exporter.shutdown()
             self.logger.debug("Shut down.")
@@ -106,25 +117,35 @@ actor OTelBatchSpanProcessor<Exporter: OTelSpanExporter, Clock: _Concurrency.Clo
             return
         }
         logger.debug("Force flushing.", metadata: ["buffer_size": "\(buffer.count)"])
-        try await withTimeout(configuration.exportTimeout, clock: clock) {
-            await withTaskGroup { group in
-                var buffer = self.buffer
-                while !buffer.isEmpty {
-                    let batch = buffer.prefix(self.configuration.maxExportBatchSize)
-                    buffer.removeFirst(batch.count)
-                    group.addTask { await self.export(batch) }
-                }
-                await group.waitForAll()
-                do {
-                    try await self.exporter.forceFlush()
-                } catch {
-                    self.logger.warning("Force flush failed.", error: error)
-                }
+        // Drain a single mutable owner. Capturing an immutable copy here would
+        // retain already-exported snapshots while their credits allow new ingress.
+        let pending = NIOLockedValueBox(buffer)
+        buffer.removeAll()
+        defer {
+            pending.withLockedValue { queue in
+                for span in queue { span.admission?.release() }
+                queue.removeAll()
             }
+        }
+        try await withTimeout(configuration.exportTimeout, clock: clock) {
+            while true {
+                try Task.checkCancellation()
+                let batch = pending.withLockedValue { queue in
+                    let batch = Array(queue.prefix(self.configuration.maxExportBatchSize))
+                    queue.removeFirst(batch.count)
+                    return batch
+                }
+                guard !batch.isEmpty else { break }
+                await self.export(batch)
+            }
+            try await self.exporter.forceFlush()
         }
     }
 
-    private func tick() async {
+    private func reportDroppedSpans() {
+        let admissionDrops = admissionBudget.snapshot.dropped
+        droppedCount += admissionDrops - reportedAdmissionDrops
+        reportedAdmissionDrops = admissionDrops
         if droppedCount > 0 {
             logger.warning("Spans were dropped this iteration because queue was full", metadata: [
                 "queue_size": "\(configuration.maxQueueSize)",
@@ -132,12 +153,16 @@ actor OTelBatchSpanProcessor<Exporter: OTelSpanExporter, Clock: _Concurrency.Clo
             ])
             droppedCount = 0
         }
+    }
+
+    private func tick() async {
         let batch = buffer.prefix(configuration.maxExportBatchSize)
         buffer.removeFirst(batch.count)
         await export(batch)
     }
 
     private func export(_ batch: some Collection<OTelFinishedSpan> & Sendable) async {
+        defer { for span in batch { span.admission?.release() } }
         let batchID = batchID
         self.batchID += 1
 
@@ -151,7 +176,7 @@ actor OTelBatchSpanProcessor<Exporter: OTelSpanExporter, Clock: _Concurrency.Clo
                 logger.debug("Exported batch.")
             }
         } catch {
-            logger.warning("Failed to export batch.", error: error)
+            logger.warning("Failed to export batch.")
         }
     }
 }

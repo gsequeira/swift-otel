@@ -20,4 +20,15 @@ protocol OTelMetricProducer: Sendable {
     ///
     /// - Returns: a batch of metric points.
     func produce() -> [OTelMetricPoint]
+    func produceCancellable() async throws -> [OTelMetricPoint]
+}
+
+// Compatibility for existing producers; only cooperative producers qualify for the pilot.
+extension OTelMetricProducer {
+    func produceCancellable() async throws -> [OTelMetricPoint] {
+        try Task.checkCancellation()
+        let points = produce()
+        try Task.checkCancellation()
+        return points
+    }
 }

@@ -33,8 +33,8 @@ final class OTelTracer<
     private let resource: OTelResource
     private let logger: Logger
 
-    private let eventStream: AsyncStream<Event>
-    private let eventStreamContinuation: AsyncStream<Event>.Continuation
+    private let eventStream: AsyncStream<Void>
+    private let eventStreamContinuation: AsyncStream<Void>.Continuation
     private let recordingSpans = NIOLockedValueBox([OTelSpanContext: OTelSpan]())
 
     init(
@@ -52,14 +52,9 @@ final class OTelTracer<
         self.processor = processor
         self.logger = logger.withMetadata(component: "OTelTracer")
         self.resource = resource
-        (eventStream, eventStreamContinuation) = AsyncStream.makeStream()
+        (eventStream, eventStreamContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
     }
 
-    private enum Event {
-        case spanStarted(_ span: OTelSpan, parentContext: ServiceContext)
-        case spanEnded(_ span: OTelFinishedSpan)
-        case forceFlushed
-    }
 }
 
 extension OTelTracer where Clock == ContinuousClock {
@@ -96,18 +91,9 @@ extension OTelTracer: Service {
     func run() async throws {
         logger.debug("Starting.")
         await withGracefulShutdownHandler {
-            for await event in eventStream {
-                // We don't want to propagate the current span's service context into
-                // processing or exporting since it's not part of the span's scope.
+            for await _ in eventStream {
                 await ServiceContext.$current.withValue(nil) {
-                    switch event {
-                    case .spanStarted(let span, let parentContext):
-                        self.processor.onStart(span, parentContext: parentContext)
-                    case .spanEnded(let span):
-                        self.processor.onEnd(span)
-                    case .forceFlushed:
-                        try? await self.processor.forceFlush()
-                    }
+                    try? await self.processor.forceFlush()
                 }
             }
         } onGracefulShutdown: {
@@ -189,13 +175,15 @@ extension OTelTracer: Tracer {
             )
             recordingSpans.withLockedValue { $0[spanContext] = recordingSpan }
             let span = recordingSpan
-            eventStreamContinuation.yield(.spanStarted(span, parentContext: parentContext))
+            ServiceContext.$current.withValue(nil) {
+                processor.onStart(span, parentContext: parentContext)
+            }
             return span
         }
     }
 
     func forceFlush() {
-        eventStreamContinuation.yield(.forceFlushed)
+        eventStreamContinuation.yield(())
     }
 
     private func process(_ span: OTelRecordingSpan, endedAt endTimeNanosecondsSinceEpoch: UInt64) {
@@ -212,7 +200,7 @@ extension OTelTracer: Tracer {
             events: span.events,
             links: span.links
         )
-        eventStreamContinuation.yield(.spanEnded(finishedSpan))
+        ServiceContext.$current.withValue(nil) { processor.onEnd(finishedSpan) }
     }
 
     func activeSpan(identifiedBy context: ServiceContext) -> OTelSpan? {
@@ -240,7 +228,7 @@ extension OTelTracer: Instrument {
         do {
             context.spanContext = try propagator.extractSpanContext(from: carrier, using: extractor)
         } catch {
-            logger.warning("Failed to extract span context.", error: error, metadata: ["carrier": "\(carrier)"])
+            logger.warning("Failed to extract span context.")
         }
     }
 }
